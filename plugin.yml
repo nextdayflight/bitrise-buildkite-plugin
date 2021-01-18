@@ -1,0 +1,15 @@
+name: Bitrise
+description: Bitrise API + Buildkite integration
+author: https://github.com/nextdayflight
+requirements: []
+configuration:
+  properties:
+    command:
+      type: string
+    build_params:
+      type: object
+    app-slug:
+      type: string
+    timeout:
+      type: integer
+  additionalProperties: true

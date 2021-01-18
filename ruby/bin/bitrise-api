@@ -1,0 +1,117 @@
+#!/usr/bin/env ruby
+
+require 'bundler/setup'
+require 'faraday'
+require 'json'
+require 'time'
+
+class BitriseApi
+  BITRISE_URI = 'https://api.bitrise.io/v0.1'.freeze
+
+  def initialize(app_slug, access_token)
+    @app_slug = app_slug
+    @access_token = access_token
+
+    plugins = JSON.load(ENV['BUILDKITE_PLUGINS'])
+    bitrise_plugin = plugins.filter { |plugin| plugin.first[0] =~ /bitrise.+plugin/ }[0]
+    plugin = bitrise_plugin.first[0]
+    @params = bitrise_plugin.dig(plugin)
+  end
+
+  def run(command)
+    response =
+      case command
+      when 'me'
+        me
+
+      when 'trigger_build'
+        trigger_build(@params.dig('build_params'))
+      
+      when 'wait_for_build'
+        wait_for_build(@params.dig('timeout').to_i)
+      end   
+  end
+
+  private
+
+  def me
+    uri = "#{BITRISE_URI}/me"
+    response = JSON.load(get('me', uri).body)
+    puts response
+
+    system("buildkite-agent annotate --style info 'username: #{response['data']['username']}, slug: #{response['data']['slug']}'")
+  end
+
+  def trigger_build(build_params)
+    uri = "#{BITRISE_URI}/apps/#{@app_slug}/builds"
+
+    post_data = {
+      'hook_info' => {
+        'type' => 'bitrise'
+      },
+      'build_params' => build_params
+    }
+
+    build_response = JSON.load(post('trigger_build', uri, post_data).body)
+
+    system("buildkite-agent meta-data set build_slug #{build_response['build_slug']}")
+    system("buildkite-agent annotate --style info 'Build triggered: #{build_response['build_url']}'")
+  end
+
+  def wait_for_build(timeout)
+    build_slug = `buildkite-agent meta-data get build_slug`
+    uri = "#{BITRISE_URI}/apps/#{@app_slug}/builds/#{build_slug}"
+
+    waiting = true
+    while waiting
+      response = JSON.load(get('wait_for_build', uri).body)
+
+      status_text = response['data']['status_text']
+      if status_text == 'in-progress'
+        triggered_at = Time.parse(response['data']['triggered_at'])
+        if (Time.now - triggered_at) > timeout
+          waiting = false
+          system("buildkite-agent annotate --style warning 'Build has exceeded configured timeout'")
+        end
+
+        sleep(30)
+      else
+        waiting = false
+        finished_at = Time.parse(response['data']['finished_at'])
+
+        if status_text == 'aborted'
+          system("buildkite-agent annotate --style warning 'Build was aborted at #{finished_at.iso8601}'")
+        else
+          system("buildkite-agent annotate --style info 'Build completed at #{finished_at.iso8601}'")
+        end
+      end
+    end
+  end
+
+  def get(command, uri)
+    response = faraday(uri).get
+    raise "#{command} failure: '" + response.body + "'" unless response.success?
+    response
+  end
+
+  def post(command, uri, data)
+    response = faraday(uri).post(uri, JSON.dump(data), 'Content-Type' => 'application/json')
+    raise "#{command} failure: '" + response.body + "'" unless response.success?
+    response
+  end
+
+  def faraday(uri)
+    Faraday.new(uri, headers: {'Authorization' => @access_token})
+  end
+end
+
+if __FILE__ == $PROGRAM_NAME
+  required_envvars = %w(BITRISE_ACCESS_TOKEN BUILDKITE_PLUGIN_BITRISE_APP_SLUG BUILDKITE_PLUGIN_BITRISE_COMMAND)
+  provided_envvars = ENV.keys.intersection(required_envvars)
+  unless provided_envvars.sort == required_envvars.sort
+    raise "Missing ENV variables: " + (required_envvars - provided_envvars).join(', ')
+  end
+
+  bitrise = BitriseApi.new(ENV['BUILDKITE_PLUGIN_BITRISE_APP_SLUG'], ENV['BITRISE_ACCESS_TOKEN'])
+  bitrise.run(ENV['BUILDKITE_PLUGIN_BITRISE_COMMAND'])
+end
