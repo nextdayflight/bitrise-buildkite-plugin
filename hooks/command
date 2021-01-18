@@ -1,0 +1,28 @@
+#!/bin/bash
+
+set -euo pipefail
+
+PLUGIN_DIR="$(cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd)/.."
+
+cd ${PLUGIN_DIR}
+echo "Building image locally"
+IMAGE=bitrise
+docker build -t "$IMAGE" .
+
+echo "--- Triggering Bitrise"
+
+buildkite_agent=$(which buildkite-agent)
+
+docker \
+  --log-level "error" \
+  run \
+  --rm \
+  --mount type=bind,src=${buildkite_agent},dst=/usr/bin/buildkite-agent \
+  --env BUILDKITE_BUILD_ID --env BUILDKITE_JOB_ID --env BUILDKITE_PLUGINS \
+  --env BUILDKITE_AGENT_ID --env BUILDKITE_AGENT_ACCESS_TOKEN --env BUILDKITE_AGENT_ENDPOINT \
+  --env "BUILDKITE_PLUGIN_BITRISE_APP_SLUG=${BUILDKITE_PLUGIN_BITRISE_APP_SLUG:-}" \
+  --env "BUILDKITE_PLUGIN_BITRISE_COMMAND=${BUILDKITE_PLUGIN_BITRISE_COMMAND:-}" \
+  --env BITRISE_ACCESS_TOKEN \
+  --env HTTP_PROXY --env HTTPS_PROXY \
+  --volume "${PLUGIN_DIR}/ruby:/src" \
+  ${IMAGE} ruby /src/bin/bitrise-api
